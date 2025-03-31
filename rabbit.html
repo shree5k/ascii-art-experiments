@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Winking Rabbit ASCII Art</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400&display=swap');
+        body { margin: 0; padding: 0; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: #E0D6D1; font-family: "Roboto Mono", monospace; overflow: hidden; }
+        .stage { width: 90vw; height: 10vh; position: relative; display: flex; align-items: center; justify-content: flex-start; }
+        .ascii-container { position: absolute; bottom: 5px; left: 5%; text-align: center; transition: transform 0.15s ease-out, left 0.25s linear; cursor: default; }
+        pre { font-family: "Roboto Mono", monospace; font-size: 2rem; line-height: 1.2; color: #000; margin: 0; cursor: pointer; transition: transform 0.1s ease-in-out; white-space: pre; user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; }
+        .controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; justify-content: center; gap: 10px; padding: 10px; z-index: 10; }
+        button { padding: 8px 16px; border: none; background-color: #fff; color: #000; border-radius: 4px; cursor: pointer; font-family: inherit; transition: background-color 0.2s ease; }
+        button:hover { background-color: #666; }
+    </style>
+</head>
+<body>
+    <div class="stage">
+        <div class="ascii-container" id="container">
+            <pre id="rabbit-ascii">  =.,
+(  / </pre>
+        </div>
+    </div>
+    <div class="controls" style="display: none;">
+        <button id="btn-toggle">Pause Animation</button>
+        <button id="btn-reset">Reset Position</button>
+    </div>
+
+    <script>
+        (function() { // Start IIFE Scope
+
+            // --- Configuration ---
+            const config = {
+                initialPositionX: 5,
+                movementAmount: 5, // Percentage per hop
+                stageWidthMarginPercent: 4, // Estimated % width of rabbit for boundary calc
+                minIdleDelay: 400,
+                maxIdleDelay: 1200,
+                minPettedIdleDelay: 500,
+                maxPettedIdleDelay: 1500,
+                pettedSniffChance: 0.3,
+                // Action chances (Right-facing)
+                hopChance: 0.55, // -> Hop (cumulative: 0.55)
+                sniffRightChance: 0.85, // -> Sniff (cumulative: 0.85)
+                // turnLeftChance: 1.0, // -> Turn (implicitly the rest)
+                // Action chances (Left-facing)
+                turnRightChance: 0.65, // -> Turn (cumulative: 0.65)
+                // sniffLeftChance: 1.0, // -> Sniff (implicitly the rest)
+                // Animation Timings (ms)
+                sniffFrameDuration: 75,
+                sniffInterval: 140,
+                turnPrepTime: 50,
+                turnDuration: 150,
+                hopDipTime: 80,
+                hopJumpTime: 100, // Time from dip to peak visual
+                hopAirTime: 150, // Time at peak before landing starts
+                hopMoveDelay: 100, // Delay after jump starts before position updates
+                hopLandSettleTime: 80, // Time from land visual to fully settled
+                winkTurnDuration: 180,
+                winkFaceDuration: 500,
+                // CSS Transition Durations (match CSS if possible, for logic)
+                cssMoveDuration: 250, // Matches 'left 0.25s linear'
+                cssHopUpDuration: 180, // Matches 'transform 0.18s ease-out' for jump up
+                cssHopDownDuration: 150, // Matches 'transform 0.15s ease-in' for land
+            };
+
+            // --- ASCII Art Parts ---
+            const ascii = {
+                bodyRight: `(  / `,
+                bodyLeft: `(  w `,
+                bodyJumpRight: `(  ^)`,
+                headRightComma: `  =.,`,
+                headRightPeriod: `  =..`, // Sniffing Right
+                headLeftComma: ` ,.=`,
+                headLeftPeriod: ` ..=`, // Sniffing Left
+                headRightPetted: `  ~.u`,
+                headLeftPetted: ` u.~ `,
+                headRightWink: ` .= -`, // Facing right, left eye closed
+                headLeftWink: ` -.= `, // Facing left, right eye closed
+            };
+
+            // --- DOM Elements ---
+            const dom = {
+                rabbitAscii: document.getElementById('rabbit-ascii'),
+                container: document.getElementById('container'),
+                btnToggle: document.getElementById('btn-toggle'),
+                btnReset: document.getElementById('btn-reset'),
+                stage: document.querySelector('.stage'),
+                controls: document.querySelector('.controls')
+            };
+
+            // --- State Variables ---
+            let state = {
+                isSniffing: false,
+                isJumping: false,
+                isTurning: false,
+                isFacingLeft: false,
+                isPaused: false,
+                isBeingPetted: false,
+                isWinking: false, // Specific wink animation sequence
+                currentPositionX: config.initialPositionX,
+                originalDirectionLeft: false, // Temp storage during wink/turn
+                nextActionTimeout: null,
+                winkAnimationTimeout: null,
+            };
+
+            // --- Helper Functions ---
+            function getRandomDelay(min, max) { return Math.random() * (max - min) + min; }
+            function getRandomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+            /** Checks if any major action (jump, turn, sniff, wink) is in progress */
+            function isActionInProgress() {
+                return state.isJumping || state.isTurning || state.isSniffing || state.isWinking;
+            }
+
+            /** Clears all scheduled timeouts */
+            function clearAllTimeouts() {
+                clearTimeout(state.nextActionTimeout);
+                clearTimeout(state.winkAnimationTimeout);
+                state.nextActionTimeout = null;
+                state.winkAnimationTimeout = null;
+            }
+
+            // --- Core Action Functions ---
+
+            /** Updates the displayed ASCII based on the current state */
+            function updateRabbitDisplay() {
+                // Wink animation updates display directly during its steps.
+                // This handles states *around* or *outside* the wink animation.
+                if (state.isWinking) {
+                    // If wink is active, its specific steps control the display.
+                    // We might still be turning *during* the wink.
+                    if(state.isTurning) {
+                        let turningHead = state.isFacingLeft ? ascii.headLeftComma : ascii.headRightComma;
+                        let turningBody = state.isFacingLeft ? ascii.bodyLeft : ascii.bodyRight;
+                        dom.rabbitAscii.textContent = turningHead + '\n' + turningBody;
+                    }
+                    // If not turning within the wink, the wink logic sets the specific wink face.
+                    return;
+                }
+
+                let displayHead;
+                let displayBody;
+
+                 // If turning (but not part of a wink), show normal face for target direction
+                 if (state.isTurning) {
+                    displayHead = state.isFacingLeft ? ascii.headLeftComma : ascii.headRightComma;
+                    displayBody = state.isFacingLeft ? ascii.bodyLeft : ascii.bodyRight;
+                 }
+                // Petted state (overrides normal look if not turning/winking)
+                else if (state.isBeingPetted) {
+                    displayHead = state.isFacingLeft ? ascii.headLeftPetted : ascii.headRightPetted;
+                    displayBody = state.isFacingLeft ? ascii.bodyLeft : ascii.bodyRight;
+                    // Reset jump transform if needed (e.g., petted mid-air)
+                    if (dom.rabbitAscii.style.transform !== 'translateY(0px)') {
+                        dom.rabbitAscii.style.transition = 'transform 0.1s ease-out';
+                        dom.rabbitAscii.style.transform = 'translateY(0px)';
+                        // Restore transition after short delay if still petted
+                        setTimeout(() => {
+                            if (state.isBeingPetted) {
+                                dom.rabbitAscii.style.transition = 'transform 0.1s ease-in-out';
+                            }
+                        }, 110);
+                    }
+                }
+                // Normal state logic (not petted, not winking, not turning)
+                else {
+                    if (state.isSniffing) {
+                        displayHead = state.isFacingLeft ? ascii.headLeftPeriod : ascii.headRightPeriod;
+                    } else {
+                        displayHead = state.isFacingLeft ? ascii.headLeftComma : ascii.headRightComma;
+                    }
+                    // Jumping only affects body when facing right in this setup
+                    displayBody = (state.isJumping && !state.isFacingLeft) ? ascii.bodyJumpRight : (state.isFacingLeft ? ascii.bodyLeft : ascii.bodyRight);
+                }
+                dom.rabbitAscii.textContent = displayHead + '\n' + displayBody;
+            }
+
+            /** Performs the Wink Animation Sequence */
+            function performWinkAnimation() {
+                // Prevent starting if paused, already doing something major, or jumping
+                if (state.isPaused || isActionInProgress() || state.isJumping ) return;
+
+                state.isWinking = true;
+                state.isTurning = true; // Start the first turn of the wink
+                state.originalDirectionLeft = state.isFacingLeft; // Remember starting direction
+                clearTimeout(state.nextActionTimeout); // Cancel any pending regular actions
+                clearTimeout(state.winkAnimationTimeout); // Clear previous wink timeout
+
+                // --- Step 1: Turn to face opposite direction ---
+                state.isFacingLeft = !state.originalDirectionLeft;
+                updateRabbitDisplay(); // Show normal face turned opposite
+                dom.rabbitAscii.style.transform = 'translateY(0px)'; // Ensure not visually jumping
+
+                state.winkAnimationTimeout = setTimeout(() => {
+                    if (!state.isWinking || state.isPaused) { resetWinkState(); return; } // Check if aborted
+                    state.isTurning = false; // Finished first turn
+
+                    // --- Step 2: Show Wink Face ---
+                    const winkHead = state.isFacingLeft ? ascii.headLeftWink : ascii.headRightWink;
+                    const winkBody = state.isFacingLeft ? ascii.bodyLeft : ascii.bodyRight;
+                    dom.rabbitAscii.textContent = winkHead + '\n' + winkBody; // Direct display update
+
+                    state.winkAnimationTimeout = setTimeout(() => {
+                        if (!state.isWinking || state.isPaused) { resetWinkState(); return; }
+
+                        // --- Step 3: Turn back to original direction ---
+                        state.isTurning = true; // Start second turn
+                        state.isFacingLeft = state.originalDirectionLeft;
+                        updateRabbitDisplay(); // Show normal face turned back
+
+                        state.winkAnimationTimeout = setTimeout(() => {
+                             if (!state.isWinking || state.isPaused) { resetWinkState(); return; } // Final check
+
+                            // --- Step 4: Finish Animation ---
+                            resetWinkState(); // Clean up and potentially resume actions
+
+                        }, config.winkTurnDuration); // Duration of turn back animation
+                    }, config.winkFaceDuration); // Duration wink face is shown
+                }, config.winkTurnDuration); // Duration of first turn animation
+            }
+
+            /** Helper to clean up wink state and resume normal flow */
+            function resetWinkState() {
+                const wasWinking = state.isWinking; // Remember if we were actually winking
+                clearTimeout(state.winkAnimationTimeout);
+                state.winkAnimationTimeout = null;
+                state.isWinking = false;
+                state.isTurning = false; // Ensure turning state is reset
+                state.isFacingLeft = state.originalDirectionLeft; // Revert to original direction
+
+                updateRabbitDisplay(); // Update display to reflect current non-wink state (petted or normal)
+
+                // If the wink finished or was aborted, and we are not paused,
+                // decide the next action. This handles resuming after wink completion
+                // or interruption (like mouseleave or pause).
+                if (wasWinking && !state.isPaused) {
+                    decideNextAction();
+                }
+            }
+
+            /** Performs a number of sniffs */
+            function performSniff(count = 1, callback) {
+                 // Can't sniff if paused or another action is happening (including wink)
+                 if (state.isPaused || isActionInProgress()) {
+                    if (callback) setTimeout(callback, 0); // Call callback immediately if provided
+                    return;
+                 }
+
+                state.isSniffing = true;
+                let sniffsDone = 0;
+
+                function nextSniff() {
+                     // Check pause/interruptions *before* each sniff action
+                     if (state.isPaused || sniffsDone >= count || state.isWinking || state.isJumping || state.isTurning) {
+                        state.isSniffing = false;
+                        updateRabbitDisplay(); // Ensure correct final display
+                        if (callback) callback();
+                        return;
+                     }
+
+                    // Perform one sniff cycle
+                    state.isSniffing = true; // Mark as sniffing for this short duration
+                    updateRabbitDisplay(); // Show sniff face
+
+                    setTimeout(() => {
+                        state.isSniffing = false; // End sniff visual state
+                         // Check pause/interruptions *again* before reverting display & continuing
+                         if (state.isPaused || state.isWinking || state.isJumping || state.isTurning) {
+                             updateRabbitDisplay(); // Update display based on interrupting state
+                             if (callback) callback();
+                             return;
+                         }
+
+                        updateRabbitDisplay(); // Revert appearance to normal/petted
+                        sniffsDone++;
+
+                        if (sniffsDone < count && !state.isPaused) { // Check pause before scheduling next
+                            setTimeout(nextSniff, config.sniffInterval);
+                        } else {
+                            if (callback) callback(); // Finished all sniffs or paused
+                        }
+                    }, config.sniffFrameDuration);
+                }
+                nextSniff(); // Start the first sniff
+            }
+
+            /** Turns the rabbit to face the opposite direction */
+            function turnRabbit(callback) {
+                 // Can't turn if paused, petted, winking, or another action is in progress
+                 if (state.isPaused || state.isBeingPetted || isActionInProgress()) {
+                    if (callback) setTimeout(callback, 0);
+                    return;
+                 }
+
+                state.isTurning = true;
+                state.originalDirectionLeft = state.isFacingLeft; // Store just in case
+                clearTimeout(state.nextActionTimeout); // Prevent immediate next action
+
+                // Short delay before visual turn starts
+                setTimeout(() => {
+                    // Check if paused/interrupted before executing turn
+                    if (state.isPaused || state.isWinking || state.isJumping || state.isSniffing) {
+                        state.isTurning = false;
+                        updateRabbitDisplay(); // Revert to current state display
+                        if (callback) callback(); // Signal completion (aborted)
+                        return;
+                    }
+
+                    state.isFacingLeft = !state.isFacingLeft;
+                    updateRabbitDisplay(); // Show turning state
+
+                    // Wait for turn duration
+                    setTimeout(() => {
+                        state.isTurning = false;
+                        // Only call callback if not paused/interrupted during turn visual
+                        if (callback && !state.isPaused && !state.isWinking && !state.isJumping && !state.isSniffing) {
+                            callback();
+                        } else {
+                            updateRabbitDisplay(); // Ensure final display is correct if interrupted
+                        }
+                    }, config.turnDuration);
+                }, config.turnPrepTime);
+            }
+
+             /** Makes the rabbit hop forward */
+            function hop(callback) {
+                // Can't hop if paused, petted, winking, facing left, or another action is in progress
+                if (state.isPaused || state.isBeingPetted || isActionInProgress() || state.isFacingLeft) {
+                    if (callback) setTimeout(callback, 0);
+                    return;
+                }
+
+                state.isJumping = true;
+                dom.rabbitAscii.style.transition = 'transform 0.08s ease-in'; // Quick dip
+                dom.rabbitAscii.style.transform = 'translateY(4px)';
+
+                // Dip -> Jump up visual
+                setTimeout(() => {
+                     if (state.isPaused || state.isWinking) { state.isJumping = false; updateRabbitDisplay(); if(callback) callback(); return; } // Check interrupt
+                    dom.rabbitAscii.style.transition = `transform ${config.cssHopUpDuration / 1000}s ease-out`;
+                    updateRabbitDisplay(); // Update includes jump body
+                    dom.rabbitAscii.style.transform = 'translateY(-22px)'; // Peak jump
+
+                    // Start moving horizontally slightly after jump visual starts
+                    setTimeout(() => {
+                         if (state.isPaused || state.isWinking) { state.isJumping = false; updateRabbitDisplay(); if(callback) callback(); return; } // Check interrupt
+                         state.currentPositionX += config.movementAmount;
+                         checkBoundaries();
+                         dom.container.style.transition = `left ${config.cssMoveDuration / 1000}s linear`;
+                         dom.container.style.left = state.currentPositionX + '%';
+                     }, config.hopMoveDelay); // Delay horizontal move
+
+                     // Air time -> Land visual
+                    setTimeout(() => {
+                         if (state.isPaused || state.isWinking) { state.isJumping = false; updateRabbitDisplay(); if(callback) callback(); return; } // Check interrupt
+                         dom.rabbitAscii.style.transition = `transform ${config.cssHopDownDuration / 1000}s ease-in`;
+                         dom.rabbitAscii.style.transform = 'translateY(0)';
+
+                        // Settle time after landing
+                        setTimeout(() => {
+                             // No check here, just finish the jump state
+                             state.isJumping = false;
+                             updateRabbitDisplay(); // Back to normal body
+                             // Restore transitions
+                             dom.container.style.transition = `transform 0.15s ease-out, left ${config.cssMoveDuration / 1000}s linear`;
+                             dom.rabbitAscii.style.transition = 'transform 0.1s ease-in-out';
+                             // Call callback only if not paused/interrupted *at the end*
+                             if (callback && !state.isPaused && !state.isWinking) {
+                                callback();
+                             } else if (state.isPaused || state.isWinking) {
+                                 updateRabbitDisplay(); // Ensure display updates if paused during settle
+                             }
+                        }, config.hopLandSettleTime);
+                    }, config.hopAirTime);
+                }, config.hopDipTime);
+            }
+
+            /** Checks boundaries and wraps rabbit if needed */
+            function checkBoundaries() {
+                const stageWidth = dom.stage.offsetWidth; // Use offsetWidth for actual pixels
+                // Estimate container width in pixels or use a fixed % assumption
+                const estimatedContainerWidthPercent = config.stageWidthMarginPercent * 2; // Adjust as needed
+                const rightBoundaryPercent = 100 - estimatedContainerWidthPercent / 2;
+
+                if (state.currentPositionX > rightBoundaryPercent) {
+                    state.currentPositionX = -estimatedContainerWidthPercent / 2; // Wrap to left
+                    // Temporarily disable transition for instant wrap
+                    dom.container.style.transition = 'none';
+                    dom.container.style.left = state.currentPositionX + '%';
+                    // Force reflow/repaint before re-enabling transition
+                    void dom.container.offsetWidth;
+                    dom.container.style.transition = `transform 0.15s ease-out, left ${config.cssMoveDuration / 1000}s linear`;
+                }
+            }
+
+            /** Resets rabbit position and state to defaults */
+            function resetPosition() {
+                clearAllTimeouts(); // Clear pending actions/animations
+
+                // Reset all state flags
+                state.isPaused = false;
+                state.isJumping = false;
+                state.isSniffing = false;
+                state.isTurning = false;
+                state.isBeingPetted = false;
+                state.isWinking = false;
+                state.isFacingLeft = false; // Force facing right
+                state.originalDirectionLeft = false;
+
+                dom.btnToggle.textContent = 'Pause Animation';
+
+                // Reset position and visuals instantly
+                dom.container.style.transition = 'none';
+                state.currentPositionX = config.initialPositionX;
+                dom.container.style.left = state.currentPositionX + '%';
+                dom.rabbitAscii.style.transform = 'translateY(0) scale(1)';
+
+                updateRabbitDisplay(); // Update to default non-petted state
+
+                // Use timeout to allow instant visual reset before restoring transitions and restarting loop
+                setTimeout(() => {
+                    dom.container.style.transition = `transform 0.15s ease-out, left ${config.cssMoveDuration / 1000}s linear`;
+                    dom.rabbitAscii.style.transition = 'transform 0.1s ease-in-out';
+                    decideNextAction(); // Restart action loop
+                }, 50);
+            }
+
+            // --- Animation Control Logic ---
+
+            /** Decides the next random action for the rabbit */
+            function decideNextAction() {
+                clearTimeout(state.nextActionTimeout); // Clear previous schedule
+
+                // If paused or an action/wink is already happening, wait and check again
+                if (state.isPaused || isActionInProgress()) {
+                    // Don't reschedule if winking, wink completion/reset handles resumption
+                    if (!state.isWinking) {
+                       state.nextActionTimeout = setTimeout(decideNextAction, 200); // Check again soon
+                    }
+                    return;
+                }
+
+                const randomChoice = Math.random();
+                let delay;
+                let actionFn;
+                let actionArgs = [decideNextAction]; // Default callback is to loop
+
+                // --- Petted State Actions ---
+                if (state.isBeingPetted) {
+                    delay = getRandomDelay(config.minPettedIdleDelay, config.maxPettedIdleDelay);
+                    if (randomChoice < config.pettedSniffChance) {
+                        // Schedule a sniff while petted
+                        actionFn = performSniff;
+                        actionArgs.unshift(getRandomInt(1, 2)); // Add sniff count arg
+                    } else {
+                        // Just wait (schedule next decision)
+                        actionFn = decideNextAction;
+                        actionArgs = []; // No extra args for decideNextAction itself
+                    }
+                }
+                // --- Normal Actions (Not Petted) ---
+                else {
+                    delay = getRandomDelay(config.minIdleDelay, config.maxIdleDelay);
+
+                    if (state.isFacingLeft) {
+                        // --- Actions When Facing Left ---
+                         if (randomChoice < config.turnRightChance) { // Turn Right
+                            actionFn = turnRabbit;
+                        } else { // Sniff Left
+                             actionFn = performSniff;
+                             actionArgs.unshift(getRandomInt(1, 3));
+                        }
+                    } else {
+                        // --- Actions When Facing Right ---
+                        if (randomChoice < config.hopChance) { // Hop Sequence
+                            const hopCount = getRandomInt(1, 4);
+                            let hopsDone = 0;
+                            // Define a local function for the sequence
+                            function doHopSequence() {
+                                // Check pause/petting before each hop
+                                if (state.isPaused || state.isBeingPetted || hopsDone >= hopCount) {
+                                    decideNextAction(); // End sequence, decide next random action
+                                    return;
+                                }
+                                // Add small delay between hops in sequence
+                                const hopDelay = (hopsDone > 0) ? getRandomDelay(150, 400) : 0;
+                                setTimeout(() => {
+                                     // Start a hop, call doHopSequence again on completion
+                                     hop(() => {
+                                         hopsDone++;
+                                         // Check again *after* hop completes before next recursive call
+                                         if(!state.isPaused && !state.isBeingPetted) {
+                                             doHopSequence();
+                                         } else {
+                                             decideNextAction(); // Sequence interrupted
+                                         }
+                                     });
+                                }, hopDelay);
+                            }
+                            actionFn = doHopSequence; // Start the sequence function
+                            actionArgs = []; // Sequence manages its own looping/callback
+
+                        } else if (randomChoice < config.sniffRightChance) { // Sniff Right
+                             actionFn = performSniff;
+                             actionArgs.unshift(getRandomInt(1, 3));
+                        } else { // Turn Left
+                            actionFn = turnRabbit;
+                        }
+                    }
+                }
+
+                // Schedule the chosen action
+                state.nextActionTimeout = setTimeout(() => actionFn(...actionArgs), delay);
+            }
+
+            // --- Event Listeners ---
+            function setupEventListeners() {
+                dom.btnToggle.addEventListener('click', () => {
+                    state.isPaused = !state.isPaused;
+                    dom.btnToggle.textContent = state.isPaused ? 'Resume Animation' : 'Pause Animation';
+                    if (!state.isPaused) {
+                        // Resume: reset visual state potentially affected by pause, then decide next action
+                        updateRabbitDisplay();
+                        // If resuming during a wink, resetWinkState might handle restart logic better
+                        if (!state.isWinking) {
+                             decideNextAction();
+                        }
+                    } else {
+                        // Pause: Clear scheduled actions. Running actions check state internally.
+                        clearTimeout(state.nextActionTimeout);
+                        // If pausing during wink, its internal checks will halt steps.
+                        // Update display to reflect paused state (e.g., stop jump visual)
+                        if(state.isJumping) dom.rabbitAscii.style.transform = 'translateY(0px)';
+                         updateRabbitDisplay();
+                    }
+                });
+
+                dom.btnReset.addEventListener('click', resetPosition);
+
+                // Manual sniff on click
+                dom.rabbitAscii.addEventListener('click', () => {
+                    // Allow manual sniff only if idle and not paused/petted/winking
+                    if (!state.isPaused && !state.isBeingPetted && !isActionInProgress()) {
+                        performSniff(getRandomInt(1, 2)); // Don't provide callback, let idle timer resume
+                    }
+                });
+
+                // Petting Interaction
+                dom.rabbitAscii.addEventListener('mouseenter', () => {
+                    // Trigger only if not paused and not already petting/winking
+                    if (!state.isPaused && !state.isBeingPetted && !state.isWinking) {
+                        state.isBeingPetted = true;
+
+                         // Interrupt ongoing hop/turn/sniff immediately (visually)
+                         if (state.isJumping) {
+                            state.isJumping = false; // Stop logic
+                             dom.rabbitAscii.style.transform = 'translateY(0px)'; // Reset visual instantly
+                         }
+                         // Let wink handle turn interruption if it needs to
+                         // state.isTurning = false; // Might interfere with wink start
+                         state.isSniffing = false; // Stop sniff logic
+
+                         clearTimeout(state.nextActionTimeout); // Stop scheduled idle actions
+
+                        // Trigger the wink animation!
+                        performWinkAnimation();
+                        // updateRabbitDisplay() will be called by wink or resetWinkState
+                    } else if (!state.isPaused) {
+                         // If mouse re-enters quickly while already petting (e.g., during wink cooldown)
+                         // ensure the state flag is true.
+                         state.isBeingPetted = true;
+                         // Don't re-trigger wink if one might still be finishing/resetting
+                    }
+                });
+
+                dom.rabbitAscii.addEventListener('mouseleave', () => {
+                    if (state.isBeingPetted) {
+                        state.isBeingPetted = false;
+
+                        // If a wink animation is running, its internal timeout checks
+                        // will see isBeingPetted is false. resetWinkState will be called
+                        // either on timeout completion or if paused/re-enabled. resetWinkState
+                        // handles updating display and deciding next action appropriately.
+
+                        // If *no* wink animation is currently running (e.g., mouseleave before wink starts, or after it finished):
+                        if (!state.isWinking) {
+                            updateRabbitDisplay(); // Revert face immediately if not winking
+                            if (!state.isPaused) {
+                                // Clear any pending petted idle actions (like a scheduled sniff)
+                                clearTimeout(state.nextActionTimeout);
+                                // Resume normal random actions
+                                decideNextAction();
+                            }
+                        }
+                        // If wink *is* running, do nothing here - let the wink logic handle the state change via resetWinkState.
+                    }
+                });
+            }
+
+            // --- Initialization ---
+            function init() {
+                 // Show controls (initially hidden)
+                //  dom.controls.style.display = 'flex';
+                 // Set initial state visually
+                 dom.container.style.left = state.currentPositionX + '%';
+                 updateRabbitDisplay();
+                 // Attach event listeners
+                 setupEventListeners();
+                 // Start the animation loop
+                 decideNextAction();
+            }
+
+            // --- Start ---
+            init();
+
+        })(); // End IIFE Scope
+    </script>
+</body>
+</html>
