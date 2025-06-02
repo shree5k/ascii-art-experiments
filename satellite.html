@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Satellite Text Beam</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400&display=swap');
+        body {
+            background-color: #000000;
+            color: rgba(255, 255, 255, 0.7);
+            font-family: "Roboto Mono", monospace;
+            font-size: 16px; /* Base font size for text elements */
+            font-weight: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            overflow: hidden;
+            line-height: 1; /* Prevent extra spacing for text dots */
+        }
+
+        .satellite-dish-text {
+            font-size: 1.5em;
+            letter-spacing: -0.5px;
+            font-weight: 100;
+            margin: 0;
+            z-index: 10;
+            text-align: center; /* Ensure it's centered if it wraps */
+            position: relative;
+            top: 20%; /* Fine-tune vertical position */
+        }
+
+        .data-stream-area {
+            width: 90vw;
+            max-width: 700px; /* Max width for the stream */
+            height: 60vh; /* Reduced from 80vh */
+            max-height: 500px; /* Reduced from 650px */
+            position: relative;
+            margin-top: 20px; /* Added some spacing */
+            /* border: 1px dashed #111111; */ /* Optional for debugging */
+        }
+
+        .data-dot-text {
+            position: absolute;
+            font-size: 1.5em;
+            color: #fff; /* Bright teal color for better visibility */
+            text-shadow: 0 0 5px rgba(0, 255, 170, 0.5); /* Subtle glow */
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="satellite-dish-text" id="satelliteDish">///<>///</div>
+    <div class="data-stream-area" id="dataStreamArea">
+        <!-- Text dots will be injected here -->
+    </div>
+
+    <script>
+        const dataStreamArea = document.getElementById('dataStreamArea');
+        const satelliteDishElement = document.getElementById('satelliteDish'); // Renamed for clarity
+
+        const numberOfDotsPerBatch = 3;
+        const dotCharacter = '.'; // The character to use for dots
+        const dotSpeed = 4; // Pixels per frame, can be faster for text
+        const arrivalThreshold = 12; // Adjusted for text size potentially
+        const interDotLaunchDelay = 120; // Delay between launching dots in a batch
+
+        // Define the angle for the beams (degrees from vertical)
+        const beamAngleMagnitudeDegrees = 25; // Reduced from 25 degrees for a shallower angle
+
+        let activeDots = [];
+        let currentPhase = 'idle'; // 'idle', 'uplinking', 'downlinking'
+        let dotsLaunchedInBatch = 0;
+        let dotsArrivedInBatch = 0;
+
+        let dishVisualCenterX, dishVisualCenterY; // Visual center for targeting
+        let uplinkGroundContactX, downlinkGroundContactX, groundLevelY;
+        let streamAreaWidth, streamAreaHeight;
+
+        function updateLayoutParameters() {
+            const dishRect = satelliteDishElement.getBoundingClientRect();
+            const streamAreaRect = dataStreamArea.getBoundingClientRect();
+
+            streamAreaWidth = dataStreamArea.offsetWidth;
+            streamAreaHeight = dataStreamArea.offsetHeight;
+
+            // Calculate the visual center of the dish text itself
+            dishVisualCenterX = (dishRect.left + dishRect.width / 2) - streamAreaRect.left;
+            // Aim for slightly below the vertical center of the dish text
+            dishVisualCenterY = (dishRect.top + dishRect.height * 0.6) - streamAreaRect.top;
+
+            // Reduce the vertical distance to ground to bring dots closer
+            const verticalDistanceToGround = (streamAreaHeight - dishVisualCenterY) * 0.6; // Reduced by 30%
+            const horizontalOffset = verticalDistanceToGround * Math.tan(beamAngleMagnitudeDegrees * (Math.PI / 180));
+
+            uplinkGroundContactX = dishVisualCenterX - horizontalOffset;
+            downlinkGroundContactX = dishVisualCenterX + horizontalOffset;
+            groundLevelY = dishVisualCenterY + verticalDistanceToGround; // Adjust ground level based on new distance
+        }
+
+        function launchDot(type) {
+            const dotElement = document.createElement('div');
+            dotElement.classList.add('data-dot-text');
+            dotElement.textContent = dotCharacter;
+
+            let startX, startY, targetX, targetY;
+
+            if (type === 'uplink') {
+                startX = uplinkGroundContactX;
+                startY = groundLevelY;
+                targetX = dishVisualCenterX;
+                targetY = dishVisualCenterY;
+            } else { // downlink
+                startX = dishVisualCenterX;
+                startY = dishVisualCenterY;
+                targetX = downlinkGroundContactX;
+                targetY = groundLevelY;
+            }
+
+            // Adjust start position for the text dot's own width/height to center it on the path
+            // This is approximate as char width varies, but good enough for '.'
+            const dotRect = dotElement.getBoundingClientRect(); // Get size after setting textContent
+            const dotWidth = dotRect.width || 10; // Approx if not rendered yet
+            const dotHeight = dotRect.height || 10;
+
+            dotElement.style.left = `${startX - dotWidth / 2}px`;
+            dotElement.style.top = `${startY - dotHeight / 2}px`; // Center the dot on its Y
+            dataStreamArea.appendChild(dotElement);
+
+            const angleToTarget = Math.atan2(targetY - startY, targetX - startX);
+            const dx = Math.cos(angleToTarget) * dotSpeed;
+            const dy = Math.sin(angleToTarget) * dotSpeed;
+
+            activeDots.push({
+                element: dotElement,
+                // Store the logical center for movement, not the top-left CSS pos
+                x: startX,
+                y: startY,
+                dx: dx, dy: dy,
+                targetX: targetX, targetY: targetY,
+                type: type,
+                dotWidth: dotWidth, // Store for transform adjustment
+                dotHeight: dotHeight
+            });
+        }
+
+        function startNextBatchPhase() {
+            dotsLaunchedInBatch = 0;
+            dotsArrivedInBatch = 0;
+
+            if (currentPhase === 'idle' || currentPhase === 'downlinking_complete') {
+                currentPhase = 'uplinking';
+            } else if (currentPhase === 'uplinking_complete') {
+                currentPhase = 'downlinking';
+            }
+            launchNextDotInBatch(); // Start launching immediately
+        }
+
+        function launchNextDotInBatch() {
+            if (dotsLaunchedInBatch < numberOfDotsPerBatch) {
+                if (currentPhase === 'uplinking') {
+                    launchDot('uplink');
+                } else if (currentPhase === 'downlinking') {
+                    launchDot('downlink');
+                }
+                dotsLaunchedInBatch++;
+                if (dotsLaunchedInBatch < numberOfDotsPerBatch) {
+                    setTimeout(launchNextDotInBatch, interDotLaunchDelay);
+                }
+            }
+        }
+
+        function animateDots() {
+            for (let i = activeDots.length - 1; i >= 0; i--) {
+                const dotData = activeDots[i];
+                dotData.x += dotData.dx; // Move logical center
+                dotData.y += dotData.dy;
+
+                // Apply transform to move the top-left corner of the text element
+                dotData.element.style.transform = `translate(${dotData.x - (dotData.element.offsetLeft + dotData.dotWidth/2)}px, ${dotData.y - (dotData.element.offsetTop + dotData.dotHeight/2)}px)`;
+
+
+                const distX = dotData.targetX - dotData.x;
+                const distY = dotData.targetY - dotData.y;
+                const distanceToTarget = Math.sqrt(distX * distX + distY * distY);
+
+                let arrived = false;
+                if (dotData.type === 'uplink' && dotData.dy < 0) { // Moving up
+                    arrived = dotData.y <= dotData.targetY || distanceToTarget < arrivalThreshold;
+                } else if (dotData.type === 'downlink' && dotData.dy > 0) { // Moving down
+                    arrived = dotData.y >= dotData.targetY || distanceToTarget < arrivalThreshold;
+                }
+
+
+                if (arrived) {
+                    if (dotData.element.parentElement) {
+                        dotData.element.parentElement.removeChild(dotData.element);
+                    }
+                    activeDots.splice(i, 1);
+                    dotsArrivedInBatch++;
+
+                    if (dotsArrivedInBatch === numberOfDotsPerBatch) {
+                        // No interBatchDelay, immediately start the next phase
+                        if (currentPhase === 'uplinking') {
+                            currentPhase = 'uplinking_complete';
+                        } else if (currentPhase === 'downlinking') {
+                            currentPhase = 'downlinking_complete';
+                        }
+                        startNextBatchPhase(); // Immediately trigger next phase
+                    }
+                } else if ( // Failsafe off-screen removal
+                    dotData.y < -streamAreaHeight*0.1 || dotData.y > streamAreaHeight * 1.1 ||
+                    dotData.x < -streamAreaWidth*0.1 || dotData.x > streamAreaWidth * 1.1
+                ) {
+                     if (dotData.element.parentElement) {
+                        dotData.element.parentElement.removeChild(dotData.element);
+                    }
+                    activeDots.splice(i, 1);
+                    dotsArrivedInBatch++;
+                     if (dotsArrivedInBatch === numberOfDotsPerBatch && !currentPhase.includes('_complete')) {
+                        console.warn("Batch completed due to off-screen dots.");
+                        if (currentPhase === 'uplinking' && currentPhase !== 'uplinking_complete') {
+                             currentPhase = 'uplinking_complete';
+                             startNextBatchPhase();
+                        } else if (currentPhase === 'downlinking' && currentPhase !== 'downlinking_complete') {
+                             currentPhase = 'downlinking_complete';
+                             startNextBatchPhase();
+                        }
+                    }
+                }
+            }
+            requestAnimationFrame(animateDots);
+        }
+
+        // Initial Setup
+        updateLayoutParameters();
+        startNextBatchPhase(); // Start the first uplink batch
+        requestAnimationFrame(animateDots);
+
+        window.addEventListener('resize', () => {
+            updateLayoutParameters();
+            // If idle or a batch just completed, and no dots are flying, restart
+            if (activeDots.length === 0 && (currentPhase.includes('complete') || currentPhase === 'idle')) {
+                startNextBatchPhase();
+            }
+        });
+    </script>
+
+</body>
+</html>
